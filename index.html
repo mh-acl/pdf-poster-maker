@@ -10,7 +10,24 @@
   body { margin:0; padding:20px; font:14px system-ui, sans-serif; background:var(--bg); color:var(--fg); display:flex; flex-direction:column; gap:16px; height:100vh; }
   #drop { flex:1; min-height:200px; border:2px dashed var(--line); border-radius:10px; display:flex; align-items:center; justify-content:center; text-align:center; color:var(--mut); cursor:pointer; overflow:hidden; background:var(--card); }
   #drop.over { border-color:#3b82f6; color:#3b82f6; }
-  #drop img { max-width:100%; max-height:100%; object-fit:contain; }
+  #stage { position:relative; flex:none; box-shadow:0 1px 6px #0004; touch-action:none; user-select:none; }
+  #drop.loaded { cursor:default; }
+  #media { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:var(--card); }
+  #media img, #media canvas { width:100%; height:100%; display:block; }
+  #dim { position:absolute; inset:0; overflow:hidden; pointer-events:none; }
+  #shade { position:absolute; box-shadow:0 0 0 9999px rgba(0,0,0,.5); }
+  #cropBox { position:absolute; border:1px solid #fff; outline:1px solid #0009; cursor:move; }
+  .hd { position:absolute; width:12px; height:12px; background:#fff; border:1px solid #000a; border-radius:2px; }
+  .hd[data-e=nw] { left:-7px; top:-7px; cursor:nwse-resize; } .hd[data-e=se] { right:-7px; bottom:-7px; cursor:nwse-resize; }
+  .hd[data-e=ne] { right:-7px; top:-7px; cursor:nesw-resize; } .hd[data-e=sw] { left:-7px; bottom:-7px; cursor:nesw-resize; }
+  .hd[data-e=n] { left:calc(50% - 6px); top:-7px; cursor:ns-resize; } .hd[data-e=s] { left:calc(50% - 6px); bottom:-7px; cursor:ns-resize; }
+  .hd[data-e=w] { top:calc(50% - 6px); left:-7px; cursor:ew-resize; } .hd[data-e=e] { top:calc(50% - 6px); right:-7px; cursor:ew-resize; }
+  .hd:focus-visible { outline:2px solid #3b82f6; outline-offset:1px; }
+  #loupe { position:fixed; z-index:10; width:174px; padding:6px; pointer-events:none; background:var(--bg); border:1px solid var(--line); border-radius:8px; box-shadow:0 4px 16px #0006; font-size:12px; }
+  #loupeCv { width:160px; height:160px; display:block; border-radius:4px; }
+  #loupeLabel { margin-top:6px; font-weight:600; } #loupeLabel small { display:block; font-weight:400; color:var(--mut); }
+  .cap { color:var(--mut); font-size:12px; margin-bottom:4px; }
+  button.sec { background:var(--card); color:var(--fg); border:1px solid var(--line); font-weight:400; }
   .row { display:flex; gap:12px; align-items:center; }
   label { display:flex; flex-direction:column; gap:4px; flex:1; color:var(--mut); font-size:12px; }
   input, select { font:inherit; padding:8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); width:100%; }
@@ -19,11 +36,24 @@
   #info.green { background:#16a34a; } #info.yellow { background:#ca8a04; } #info.red { background:#dc2626; } #info.blue { background:#2563eb; }
   #drop span { white-space:pre-line; padding:12px; }
   button { padding:10px; font:inherit; font-weight:600; border:0; border-radius:8px; background:#3b82f6; color:#fff; cursor:pointer; }
+  #cropRow button { align-self:flex-end; padding:8px 10px; }
   button:disabled { opacity:.4; cursor:default; }
 </style>
 </head>
 <body>
-  <div id="drop"><span id="hint">Drop an image or PDF here<br>or click to browse</span></div>
+  <div id="drop">
+    <span id="hint">Drop an image or PDF here<br>or click to browse</span>
+    <div id="stage" hidden>
+      <div id="media"></div>
+      <div id="dim"><div id="shade"></div></div>
+      <div id="cropBox">
+        <div class="hd" tabindex="0" data-e="nw"></div><div class="hd" tabindex="0" data-e="n"></div><div class="hd" tabindex="0" data-e="ne"></div>
+        <div class="hd" tabindex="0" data-e="w"></div><div class="hd" tabindex="0" data-e="e"></div>
+        <div class="hd" tabindex="0" data-e="sw"></div><div class="hd" tabindex="0" data-e="s"></div><div class="hd" tabindex="0" data-e="se"></div>
+      </div>
+    </div>
+  </div>
+  <div id="loupe" hidden><canvas id="loupeCv"></canvas><div id="loupeLabel"></div></div>
   <input type="file" id="file" accept="image/*,application/pdf" hidden>
 
   <div class="row">
@@ -34,22 +64,49 @@
     </label>
   </div>
 
+  <div>
+    <div class="cap">Crop: <span id="cropUnit">px</span> in from each edge (or drag on the preview)</div>
+    <div class="row" id="cropRow">
+      <label>Left <input type="number" id="cl" min="0" disabled></label>
+      <label>Top <input type="number" id="ct" min="0" disabled></label>
+      <label>Right <input type="number" id="cr" min="0" disabled></label>
+      <label>Bottom <input type="number" id="cb" min="0" disabled></label>
+      <button class="sec" id="reset" disabled>Reset</button>
+    </div>
+  </div>
+
   <div id="info">No image loaded</div>
-  <button id="save" disabled>Save PDF…</button>
+  <div class="row">
+    <button class="sec" id="open">Open…</button>
+    <button id="save" style="flex:1" disabled>Save PDF…</button>
+  </div>
 
 <script src="node_modules/pdfjs-dist/build/pdf.js"></script>
 <script>
 const $ = id => document.getElementById(id);
-let img = null;                       // {bytes, type, w, h, name}
+let img = null;                       // {bytes, type, w, h, name}; w/h are px (bitmap) or pt (pdf)
+let crop = { l: 0, t: 0, r: 0, b: 0 };  // insets from each edge, in source units (px or pt)
+let inPerUnit = 0;                    // output inches per source unit; the crop holds this constant
+const MIN = 1;                        // smallest cropped size, in source units
+const FINE = 0.1;                     // drag speed multiplier while Shift is held
+const LOUPE = 160;                    // loupe canvas size, CSS px
+const ZOOMS = [2, 4, 8, 16, 32];      // loupe magnifications (CSS px per source unit)
+let loupeZoom = 8;
+const loupe = { on: false, edges: '', fx: 0, fy: 0, fine: false };
+let pdfCache = null, pdfBusy = false, keyTimer = 0;
 const toIn = v => $('unit').value === 'in' ? v : v / 25.4;
 const fromIn = v => $('unit').value === 'in' ? v : v * 25.4;
 const fmt = v => String(+v.toFixed(3));
+const q = v => img.type === 'pdf' ? Math.round(v * 100) / 100 : Math.round(v);  // pixel-exact for bitmaps
+const cw = () => img.w - crop.l - crop.r;
+const ch = () => img.h - crop.t - crop.b;
 
 async function load(file) {
   if (!file) return;
   if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) return loadPdf(file);
   if (!file.type.startsWith('image/')) return;
   let bytes = new Uint8Array(await file.arrayBuffer());
+  releaseSource();
   const oriented = await createImageBitmap(file);                          // EXIF applied
   const raw = await createImageBitmap(file, { imageOrientation: 'none' }); // as stored
   let type = file.type === 'image/jpeg' ? 'jpg' : file.type === 'image/png' ? 'png' : null;
@@ -61,17 +118,13 @@ async function load(file) {
     bytes = new Uint8Array(await (await new Promise(r => c.toBlob(r, 'image/png'))).arrayBuffer());
     type = 'png';
   }
-  img = { bytes, type, w: oriented.width, h: oriented.height, name: file.name.replace(/\.[^.]+$/, '') };
+  raw.close();
+  img = { bytes, type, bitmap: oriented, w: oriented.width, h: oriented.height, name: file.name.replace(/\.[^.]+$/, '') };
 
-  $('drop').innerHTML = '';
   const el = document.createElement('img');
   el.src = URL.createObjectURL(file);
-  $('drop').appendChild(el);
-
-  $('w').disabled = $('h').disabled = false;
-  $('w').value = fmt(fromIn(img.w / 300));     // default: 300 ppi
-  syncFrom('w');
-  $('save').disabled = false;
+  $('media').replaceChildren(el);
+  initSource(1 / 300);                          // default: 300 ppi
 }
 
 // Preview only: renders page 1 with pdf.js. The saved PDF never goes through this.
@@ -82,6 +135,7 @@ async function renderPdfPreview(bytes) {
     cMapUrl: 'node_modules/pdfjs-dist/cmaps/', cMapPacked: true
   }).promise;
   const page = await doc.getPage(1);
+  img.pdfDoc = doc; img.pdfPage = page;          // kept alive for the loupe
   const box = $('drop').getBoundingClientRect();
   const base = page.getViewport({ scale: 1 });
   const fit = Math.min((box.width - 24) / base.width, (box.height - 24) / base.height);
@@ -89,14 +143,14 @@ async function renderPdfPreview(bytes) {
   const vp = page.getViewport({ scale: fit * dpr });
   const c = document.createElement('canvas');
   c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
-  c.style.cssText = `width:${base.width * fit}px;height:${base.height * fit}px;background:#fff;box-shadow:0 1px 6px #0004`;
+  c.style.background = '#fff';                   // on-screen size is set by the crop stage
   await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
-  doc.destroy();
   return c;
 }
 
 async function loadPdf(file) {
   const bytes = new Uint8Array(await file.arrayBuffer());
+  releaseSource();
   let info;
   try { info = await window.api.inspectPdf(bytes); }
   catch (err) { $('info').className = 'red'; $('info').textContent = 'Could not read this PDF'; return; }
@@ -108,29 +162,81 @@ async function loadPdf(file) {
     preview = document.createElement('span');
     preview.textContent = `${file.name}\nPDF · ${info.pages} page${info.pages > 1 ? 's' : ''}`;
   }
-  $('drop').innerHTML = '';
-  $('drop').appendChild(preview);
+  $('media').replaceChildren(preview);
+  initSource(1 / 72);                            // default: original size
+}
 
-  $('w').disabled = $('h').disabled = false;
-  $('w').value = fmt(fromIn(img.w / 72));      // default: original size
-  syncFrom('w');
-  $('save').disabled = false;
+function releaseSource() {
+  hideLoupe();
+  pdfCache = null;
+  if (img?.pdfDoc) img.pdfDoc.destroy();
+  if (img?.bitmap) img.bitmap.close();
+}
+
+function initSource(defaultInPerUnit) {
+  loupeZoom = 8;
+  crop = { l: 0, t: 0, r: 0, b: 0 };
+  inPerUnit = defaultInPerUnit;
+  $('hint').hidden = true; $('stage').hidden = false; $('drop').classList.add('loaded');
+  $('w').disabled = $('h').disabled = $('reset').disabled = $('save').disabled = false;
+  for (const k of ['l', 't', 'r', 'b']) { $('c' + k).disabled = false; $('c' + k).step = img.type === 'pdf' ? '0.1' : '1'; }
+  $('cropUnit').textContent = img.type === 'pdf' ? 'pt' : 'px';
+  layoutStage();
+  renderCrop();
+}
+
+// Size the preview stage to fit the drop zone; the crop overlay is positioned in % of it.
+function layoutStage() {
+  if (!img) return;
+  const box = $('drop').getBoundingClientRect();
+  const fit = Math.max(0.01, Math.min((box.width - 24) / img.w, (box.height - 24) / img.h));
+  $('stage').style.width = img.w * fit + 'px';
+  $('stage').style.height = img.h * fit + 'px';
+}
+new ResizeObserver(layoutStage).observe($('drop'));
+
+function setCrop(next, edited = '') {
+  let { l, t, r, b } = next;
+  [l, t, r, b] = [l, t, r, b].map(v => Math.max(0, q(Number.isFinite(v) ? v : 0)));
+  // keep at least MIN of the image on each axis; the edge being edited gives way
+  if (l + r > img.w - MIN) { if (edited.includes('l') || !edited.includes('r')) l = Math.max(0, q(img.w - MIN - r)); else r = Math.max(0, q(img.w - MIN - l)); }
+  if (t + b > img.h - MIN) { if (edited.includes('t') || !edited.includes('b')) t = Math.max(0, q(img.h - MIN - b)); else b = Math.max(0, q(img.h - MIN - t)); }
+  crop = { l, t, r, b };
+}
+
+function renderCrop(skip) {
+  const { l, t, r, b } = crop;
+  for (const id of ['shade', 'cropBox']) {
+    const s = $(id).style;
+    s.left = l / img.w * 100 + '%'; s.top = t / img.h * 100 + '%';
+    s.right = r / img.w * 100 + '%'; s.bottom = b / img.h * 100 + '%';
+  }
+  for (const k of ['l', 't', 'r', 'b']) if (k !== skip) $('c' + k).value = fmt(crop[k]);
+  // Cropping keeps the print scale (ppi) fixed, so the output size follows the crop.
+  $('w').value = fmt(fromIn(inPerUnit * cw()));
+  $('h').value = fmt(fromIn(inPerUnit * ch()));
+  showInfo();
+}
+
+function showInfo() {
+  if (img.type === 'pdf') updatePdf(inPerUnit * 72); else update(1 / inPerUnit);
 }
 
 function updatePdf(s) {
   const info = $('info');
   info.className = 'blue';
-  info.innerHTML = `Vector PDF · ${Math.round(s * 100)}% scale <small>${img.pages} page${img.pages > 1 ? 's' : ''}, all scaled equally · text and vector art stay sharp; embedded photos keep their own resolution</small>`;
+  info.innerHTML = `Vector PDF · ${Math.round(s * 100)}% scale <small>${img.pages} page${img.pages > 1 ? 's' : ''}, all scaled and cropped equally · text and vector art stay sharp; embedded photos keep their own resolution</small>`;
 }
 
+// Output size follows the width/height fields (aspect ratio of the cropped area is kept).
 function syncFrom(which) {
   if (!img) return;
   const v = parseFloat($(which).value);
   if (!(v > 0)) { update(null); return; }
-  if (which === 'w') $('h').value = fmt(v * img.h / img.w);
-  else $('w').value = fmt(v * img.w / img.h);
-  const wIn = toIn(parseFloat($('w').value));
-  if (img.type === 'pdf') updatePdf(wIn * 72 / img.w); else update(img.w / wIn);
+  inPerUnit = toIn(v) / (which === 'w' ? cw() : ch());
+  if (which === 'w') $('h').value = fmt(fromIn(inPerUnit * ch()));
+  else $('w').value = fmt(fromIn(inPerUnit * cw()));
+  showInfo();
 }
 
 function update(ppi) {
@@ -138,26 +244,218 @@ function update(ppi) {
   if (ppi == null) { info.className = ''; info.textContent = 'Enter a size'; return; }
   const cls = ppi > 200 ? 'green' : ppi >= 100 ? 'yellow' : 'red';
   const msg = { green: 'Good print quality', yellow: 'Acceptable, may look soft up close', red: 'Low resolution, will look pixelated' }[cls];
+  const cropped = cw() !== img.w || ch() !== img.h ? ` (cropped from ${img.w} × ${img.h})` : '';
   info.className = cls;
-  info.innerHTML = `${Math.round(ppi)} ppi <small>${img.w} × ${img.h} px · ${msg}</small>`;
+  info.innerHTML = `${Math.round(ppi)} ppi <small>${cw()} × ${ch()} px${cropped} · ${msg}</small>`;
 }
+
+// ---- crop controls ----
+for (const k of ['l', 't', 'r', 'b']) {
+  $('c' + k).addEventListener('input', e => {
+    if (!img) return;
+    setCrop({ ...crop, [k]: parseFloat(e.target.value) }, k);
+    renderCrop(k);                               // don't rewrite the field being typed in
+  });
+  $('c' + k).addEventListener('change', () => img && renderCrop());   // show clamped value
+}
+$('reset').addEventListener('click', () => { setCrop({ l: 0, t: 0, r: 0, b: 0 }); renderCrop(); });
+
+const EDGE_KEY = { w: 'l', e: 'r', n: 't', s: 'b' };
+const edgesOf = mode => [...mode].map(c => EDGE_KEY[c]).join('');
+
+$('cropBox').addEventListener('pointerdown', e => {
+  if (!img) return;
+  e.preventDefault(); e.stopPropagation();
+  const mode = e.target.dataset.e || 'move';
+  if (mode !== 'move') e.target.focus();         // arrow keys continue from here
+  const el = $('cropBox'), st = { ...crop };
+  const rect = $('stage').getBoundingClientRect();
+  const kx = img.w / rect.width, ky = img.h / rect.height;   // source units per CSS px
+  const edited = mode === 'move' ? '' : edgesOf(mode);
+  const ptr = ev => ({ x: (ev.clientX - rect.left) * kx, y: (ev.clientY - rect.top) * ky });
+  let last = { x: e.clientX, y: e.clientY }, dx = 0, dy = 0;  // accumulated drag, source units
+  el.setPointerCapture(e.pointerId);
+  if (edited) showLoupe(edited, ptr(e), e.clientX, e.clientY, e.shiftKey);
+  const move = ev => {
+    // Accumulate deltas (rather than measuring from the start) so toggling Shift never makes the edge jump.
+    const f = ev.shiftKey ? FINE : 1;
+    dx += (ev.clientX - last.x) * kx * f; dy += (ev.clientY - last.y) * ky * f;
+    last = { x: ev.clientX, y: ev.clientY };
+    const c = { ...st };
+    if (mode === 'move') {                       // slide the window, size unchanged
+      const mx = q(Math.min(Math.max(dx, -st.l), st.r)), my = q(Math.min(Math.max(dy, -st.t), st.b));
+      c.l = st.l + mx; c.r = st.r - mx; c.t = st.t + my; c.b = st.b - my;
+    } else {
+      if (mode.includes('w')) c.l = st.l + dx;
+      if (mode.includes('e')) c.r = st.r - dx;
+      if (mode.includes('n')) c.t = st.t + dy;
+      if (mode.includes('s')) c.b = st.b - dy;
+    }
+    setCrop(c, edited);
+    renderCrop();
+    if (edited) updateLoupe(ptr(ev), ev.clientX, ev.clientY, ev.shiftKey);
+  };
+  const done = () => {
+    el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', done); el.removeEventListener('pointercancel', done);
+    hideLoupe();
+  };
+  el.addEventListener('pointermove', move); el.addEventListener('pointerup', done); el.addEventListener('pointercancel', done);
+});
+
+// Arrow keys on a focused handle nudge that edge: 1 px (bitmap) or 0.1 pt (PDF); Shift = 10x.
+$('cropBox').addEventListener('keydown', e => {
+  const mode = e.target.dataset.e;
+  const dir = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+  if (!img || !mode || !dir) return;
+  e.preventDefault();
+  const step = (img.type === 'pdf' ? 0.1 : 1) * (e.shiftKey ? 10 : 1);
+  const c = { ...crop };
+  if (dir[0] && mode.includes('w')) c.l += dir[0] * step;      // moving an edge toward the image centre crops more
+  if (dir[0] && mode.includes('e')) c.r -= dir[0] * step;
+  if (dir[1] && mode.includes('n')) c.t += dir[1] * step;
+  if (dir[1] && mode.includes('s')) c.b -= dir[1] * step;
+  const moved = edgesOf(mode);
+  setCrop(c, moved);
+  renderCrop();
+  const r = e.target.getBoundingClientRect();
+  showLoupe(moved, null, r.left + r.width / 2, r.top + r.height / 2, e.shiftKey);
+  clearTimeout(keyTimer); keyTimer = setTimeout(hideLoupe, 1500);
+});
+$('cropBox').addEventListener('focusout', () => { if (!$('cropBox').matches(':active')) hideLoupe(); });
+
+// ---- loupe: magnified view around the control point being moved ----
+function showLoupe(edges, ptr, cx, cy, fine) {
+  loupe.on = true; loupe.edges = edges;
+  $('loupe').hidden = false;
+  updateLoupe(ptr, cx, cy, fine);
+}
+
+function hideLoupe() {
+  clearTimeout(keyTimer);
+  loupe.on = false;
+  $('loupe').hidden = true;
+}
+
+// ptr: pointer in source units, or null (keyboard) to centre on the middle of the edge.
+function updateLoupe(ptr, cx, cy, fine) {
+  const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+  const R = img.w - crop.r, B = img.h - crop.b;
+  const ex = loupe.edges.includes('l') ? crop.l : loupe.edges.includes('r') ? R : null;
+  const ey = loupe.edges.includes('t') ? crop.t : loupe.edges.includes('b') ? B : null;
+  // Along an edge the view follows the pointer, so you can slide along it to inspect.
+  loupe.fx = ex ?? (ptr ? clamp(ptr.x, 0, img.w) : (crop.l + R) / 2);
+  loupe.fy = ey ?? (ptr ? clamp(ptr.y, 0, img.h) : (crop.t + B) / 2);
+  loupe.fine = !!fine;
+  drawLoupe();
+  // Sit up and to the right of the pointer so it never covers the edge; flip if there's no room.
+  const el = $('loupe'), w = el.offsetWidth, hh = el.offsetHeight, gap = 28;
+  let x = cx + gap, y = cy - gap - hh;
+  if (x + w > innerWidth - 4) x = cx - gap - w;
+  if (y < 4) y = cy + gap;
+  el.style.left = Math.max(4, Math.min(x, innerWidth - w - 4)) + 'px';
+  el.style.top = Math.max(4, Math.min(y, innerHeight - hh - 4)) + 'px';
+}
+
+// Copy the part of `src` that overlaps `bnds` (unit coords) into the loupe. ox/oy: unit coords of src's
+// top-left; s: src pixels per unit.
+function blit(ctx, src, ox, oy, s, bnds, wx, wy, span, z, smooth) {
+  const x0 = Math.max(wx, bnds[0]), y0 = Math.max(wy, bnds[1]);
+  const x1 = Math.min(wx + span, bnds[2]), y1 = Math.min(wy + span, bnds[3]);
+  if (!(x1 > x0 && y1 > y0)) return;
+  ctx.imageSmoothingEnabled = smooth;
+  ctx.drawImage(src, (x0 - ox) * s, (y0 - oy) * s, (x1 - x0) * s, (y1 - y0) * s,
+                (x0 - wx) * z, (y0 - wy) * z, (x1 - x0) * z, (y1 - y0) * z);
+}
+
+function drawLoupe() {
+  if (!loupe.on || !img) return;
+  const cv = $('loupeCv'), ctx = cv.getContext('2d'), dpr = window.devicePixelRatio || 1;
+  const z = loupeZoom, span = LOUPE / z, pdf = img.type === 'pdf';
+  if (cv.width !== Math.round(LOUPE * dpr)) cv.width = cv.height = Math.round(LOUPE * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // Bitmaps: snap the window to whole pixels so the pixel grid is crisp.
+  const wx = pdf ? loupe.fx - span / 2 : Math.round(loupe.fx) - Math.floor(span / 2);
+  const wy = pdf ? loupe.fy - span / 2 : Math.round(loupe.fy) - Math.floor(span / 2);
+  const full = [0, 0, img.w, img.h];
+  const X = v => (v - wx) * z, Y = v => (v - wy) * z;
+
+  ctx.fillStyle = '#2b2b2b'; ctx.fillRect(0, 0, LOUPE, LOUPE);
+  if (pdf) {
+    ctx.fillStyle = '#fff'; ctx.fillRect(X(0), Y(0), img.w * z, img.h * z);
+    const c = pdfCache;
+    const covered = c && c.z === z && wx >= c.x0 && wy >= c.y0 && wx + span <= c.x0 + c.size && wy + span <= c.y0 + c.size;
+    const pv = $('media').querySelector('canvas');
+    if (!covered && pv) blit(ctx, pv, 0, 0, pv.width / img.w, full, wx, wy, span, z, true);   // blurry stand-in
+    if (c && c.z === z) {
+      const bnds = [Math.max(0, c.x0), Math.max(0, c.y0), Math.min(img.w, c.x0 + c.size), Math.min(img.h, c.y0 + c.size)];
+      blit(ctx, c.canvas, c.x0, c.y0, z * dpr, bnds, wx, wy, span, z, true);
+    }
+    if (!covered) renderPdfRegion(wx, wy, span, z, dpr);
+  } else {
+    blit(ctx, img.bitmap, 0, 0, 1, full, wx, wy, span, z, false);          // nearest-neighbour: real pixels
+    if (z >= 8) {                                                           // faint pixel grid
+      ctx.strokeStyle = 'rgba(128,128,128,.3)'; ctx.lineWidth = 1; ctx.beginPath();
+      for (let v = Math.ceil(wx); v < wx + span; v++) { ctx.moveTo(X(v), 0); ctx.lineTo(X(v), LOUPE); }
+      for (let v = Math.ceil(wy); v < wy + span; v++) { ctx.moveTo(0, Y(v)); ctx.lineTo(LOUPE, Y(v)); }
+      ctx.stroke();
+    }
+  }
+
+  // Dim everything outside the crop, then draw the four crop edges (active one highlighted).
+  const x0 = X(crop.l), y0 = Y(crop.t), x1 = X(img.w - crop.r), y1 = Y(img.h - crop.b);
+  ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.beginPath();
+  ctx.rect(0, 0, LOUPE, LOUPE); ctx.rect(x0, y0, x1 - x0, y1 - y0); ctx.fill('evenodd');
+  for (const [k, pos, vertical] of [['l', x0, 1], ['r', x1, 1], ['t', y0, 0], ['b', y1, 0]]) {
+    const active = loupe.edges.includes(k);
+    for (const [w, col] of [[active ? 4 : 3, 'rgba(0,0,0,.6)'], [active ? 2 : 1, active ? '#3b82f6' : '#fff']]) {
+      ctx.strokeStyle = col; ctx.lineWidth = w; ctx.beginPath();
+      if (vertical) { ctx.moveTo(pos, 0); ctx.lineTo(pos, LOUPE); } else { ctx.moveTo(0, pos); ctx.lineTo(LOUPE, pos); }
+      ctx.stroke();
+    }
+  }
+
+  const unit = pdf ? 'pt' : 'px', NAMES = { l: 'Left', t: 'Top', r: 'Right', b: 'Bottom' };
+  $('loupeLabel').innerHTML = [...loupe.edges].map(k => `${NAMES[k]} ${fmt(crop[k])}`).join(' · ') + ` ${unit}` +
+    `<small>${fmt(cw())} × ${fmt(ch())} ${unit} · ${z}×${loupe.fine ? ' · fine' : ''}</small>` +
+    `<small>Shift: fine drag · Wheel: zoom · Arrows: nudge</small>`;
+}
+
+// PDF loupe: render a region 3x the window size at loupe zoom and pan around inside it,
+// so dragging blits synchronously and only re-renders when the window leaves the region.
+async function renderPdfRegion(wx, wy, span, z, dpr) {
+  if (pdfBusy || !img.pdfPage) return;
+  pdfBusy = true;
+  const src = img, size = span * 3, x0 = wx - span, y0 = wy - span;
+  try {
+    const c = document.createElement('canvas');
+    c.width = c.height = Math.ceil(size * z * dpr);
+    const vp = src.pdfPage.getViewport({ scale: z * dpr, offsetX: -x0 * z * dpr, offsetY: -y0 * z * dpr });
+    await src.pdfPage.render({ canvasContext: c.getContext('2d'), viewport: vp, background: 'rgba(0,0,0,0)' }).promise;
+    if (img === src) pdfCache = { canvas: c, x0, y0, size, z };
+  } catch (err) { /* document replaced mid-render */ }
+  pdfBusy = false;
+  if (img === src) drawLoupe();                  // also kicks another render if the window has moved on
+}
+
+let lastWheel = 0;
+window.addEventListener('wheel', e => {
+  if (!loupe.on) return;
+  e.preventDefault();
+  if (Date.now() - lastWheel < 150) return;      // trackpads fire bursts; one step per gesture tick
+  lastWheel = Date.now();
+  const i = Math.min(Math.max(ZOOMS.indexOf(loupeZoom) + (e.deltaY < 0 ? 1 : -1), 0), ZOOMS.length - 1);
+  loupeZoom = ZOOMS[i];
+  drawLoupe();
+}, { passive: false });
+$('stage').addEventListener('click', e => e.stopPropagation());   // clicking the preview shouldn't open the picker
 
 $('w').addEventListener('input', () => syncFrom('w'));
 $('h').addEventListener('input', () => syncFrom('h'));
-let lastUnit = 'in';
-$('unit').addEventListener('change', () => {
-  // keep the physical size, just change the display units
-  const v = parseFloat($('w').value);
-  if (img && v > 0) {
-    const wIn = lastUnit === 'in' ? v : v / 25.4;
-    $('w').value = fmt(fromIn(wIn));
-    syncFrom('w');
-  }
-  lastUnit = $('unit').value;
-});
+$('unit').addEventListener('change', () => { if (img) renderCrop(); });   // same physical size, new display units
 
-$('drop').addEventListener('click', () => $('file').click());
-$('file').addEventListener('change', e => load(e.target.files[0]));
+$('drop').addEventListener('click', () => { if (!img) $('file').click(); });   // once loaded, use the Open… button
+$('open').addEventListener('click', () => $('file').click());
+$('file').addEventListener('change', e => { load(e.target.files[0]); e.target.value = ''; });
 ['dragenter', 'dragover'].forEach(t => $('drop').addEventListener(t, e => { e.preventDefault(); $('drop').classList.add('over'); }));
 ['dragleave', 'drop'].forEach(t => $('drop').addEventListener(t, e => { e.preventDefault(); $('drop').classList.remove('over'); }));
 $('drop').addEventListener('drop', e => load(e.dataTransfer.files[0]));
@@ -169,8 +467,8 @@ $('save').addEventListener('click', async () => {
   if (!(wIn > 0 && hIn > 0)) return;
   const res = await window.api.savePdf({
     bytes: img.bytes, type: img.type,
-    widthPt: wIn * 72, heightPt: hIn * 72,
-    scale: wIn * 72 / img.w,                 // used for PDF input (img.w is in points)
+    scale: inPerUnit * 72,                   // points per source unit (px for bitmaps, pt for PDFs)
+    crop,
     defaultName: img.name + (img.type === 'pdf' ? '-resized' : '') + '.pdf'
   });
   if (!res.canceled) $('save').textContent = 'Saved ✓';
