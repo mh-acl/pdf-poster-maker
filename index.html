@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>PDF Poster Maker</title>
+<style>
+  :root { --bg:#fff; --fg:#222; --mut:#777; --line:#bbb; --card:#f5f5f5; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#1e1e1e; --fg:#eee; --mut:#999; --line:#555; --card:#2a2a2a; } }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:20px; font:14px system-ui, sans-serif; background:var(--bg); color:var(--fg); display:flex; flex-direction:column; gap:16px; height:100vh; }
+  #drop { flex:1; min-height:200px; border:2px dashed var(--line); border-radius:10px; display:flex; align-items:center; justify-content:center; text-align:center; color:var(--mut); cursor:pointer; overflow:hidden; background:var(--card); }
+  #drop.over { border-color:#3b82f6; color:#3b82f6; }
+  #drop img { max-width:100%; max-height:100%; object-fit:contain; }
+  .row { display:flex; gap:12px; align-items:center; }
+  label { display:flex; flex-direction:column; gap:4px; flex:1; color:var(--mut); font-size:12px; }
+  input, select { font:inherit; padding:8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); width:100%; }
+  #info { padding:12px; border-radius:8px; color:#fff; background:#888; font-weight:600; }
+  #info small { display:block; font-weight:400; opacity:.9; margin-top:2px; }
+  #info.green { background:#16a34a; } #info.yellow { background:#ca8a04; } #info.red { background:#dc2626; } #info.blue { background:#2563eb; }
+  #drop span { white-space:pre-line; padding:12px; }
+  button { padding:10px; font:inherit; font-weight:600; border:0; border-radius:8px; background:#3b82f6; color:#fff; cursor:pointer; }
+  button:disabled { opacity:.4; cursor:default; }
+</style>
+</head>
+<body>
+  <div id="drop"><span id="hint">Drop an image or PDF here<br>or click to browse</span></div>
+  <input type="file" id="file" accept="image/*,application/pdf" hidden>
+
+  <div class="row">
+    <label>Width <input type="number" id="w" step="any" min="0" disabled></label>
+    <label>Height <input type="number" id="h" step="any" min="0" disabled></label>
+    <label style="flex:.6">Units
+      <select id="unit"><option value="in">inches</option><option value="mm">mm</option></select>
+    </label>
+  </div>
+
+  <div id="info">No image loaded</div>
+  <button id="save" disabled>Save PDF…</button>
+
+<script src="node_modules/pdfjs-dist/build/pdf.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let img = null;                       // {bytes, type, w, h, name}
+const toIn = v => $('unit').value === 'in' ? v : v / 25.4;
+const fromIn = v => $('unit').value === 'in' ? v : v * 25.4;
+const fmt = v => String(+v.toFixed(3));
+
+async function load(file) {
+  if (!file) return;
+  if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) return loadPdf(file);
+  if (!file.type.startsWith('image/')) return;
+  let bytes = new Uint8Array(await file.arrayBuffer());
+  const oriented = await createImageBitmap(file);                          // EXIF applied
+  const raw = await createImageBitmap(file, { imageOrientation: 'none' }); // as stored
+  let type = file.type === 'image/jpeg' ? 'jpg' : file.type === 'image/png' ? 'png' : null;
+  // Other formats (or EXIF-rotated JPEGs) are converted to lossless PNG at the same pixel size.
+  if (!type || oriented.width !== raw.width) {
+    const c = document.createElement('canvas');
+    c.width = oriented.width; c.height = oriented.height;
+    c.getContext('2d').drawImage(oriented, 0, 0);
+    bytes = new Uint8Array(await (await new Promise(r => c.toBlob(r, 'image/png'))).arrayBuffer());
+    type = 'png';
+  }
+  img = { bytes, type, w: oriented.width, h: oriented.height, name: file.name.replace(/\.[^.]+$/, '') };
+
+  $('drop').innerHTML = '';
+  const el = document.createElement('img');
+  el.src = URL.createObjectURL(file);
+  $('drop').appendChild(el);
+
+  $('w').disabled = $('h').disabled = false;
+  $('w').value = fmt(fromIn(img.w / 300));     // default: 300 ppi
+  syncFrom('w');
+  $('save').disabled = false;
+}
+
+// Preview only: renders page 1 with pdf.js. The saved PDF never goes through this.
+async function renderPdfPreview(bytes) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'node_modules/pdfjs-dist/build/pdf.worker.js';
+  const doc = await pdfjsLib.getDocument({
+    data: bytes.slice(),                         // pdf.js takes ownership of the buffer
+    cMapUrl: 'node_modules/pdfjs-dist/cmaps/', cMapPacked: true
+  }).promise;
+  const page = await doc.getPage(1);
+  const box = $('drop').getBoundingClientRect();
+  const base = page.getViewport({ scale: 1 });
+  const fit = Math.min((box.width - 24) / base.width, (box.height - 24) / base.height);
+  const dpr = window.devicePixelRatio || 1;
+  const vp = page.getViewport({ scale: fit * dpr });
+  const c = document.createElement('canvas');
+  c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+  c.style.cssText = `width:${base.width * fit}px;height:${base.height * fit}px;background:#fff;box-shadow:0 1px 6px #0004`;
+  await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+  doc.destroy();
+  return c;
+}
+
+async function loadPdf(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let info;
+  try { info = await window.api.inspectPdf(bytes); }
+  catch (err) { $('info').className = 'red'; $('info').textContent = 'Could not read this PDF'; return; }
+  img = { bytes, type: 'pdf', w: info.width, h: info.height, pages: info.pages, name: file.name.replace(/\.[^.]+$/, '') };
+
+  let preview;
+  try { preview = await renderPdfPreview(bytes); }
+  catch (err) {                                  // fall back to a text label
+    preview = document.createElement('span');
+    preview.textContent = `${file.name}\nPDF · ${info.pages} page${info.pages > 1 ? 's' : ''}`;
+  }
+  $('drop').innerHTML = '';
+  $('drop').appendChild(preview);
+
+  $('w').disabled = $('h').disabled = false;
+  $('w').value = fmt(fromIn(img.w / 72));      // default: original size
+  syncFrom('w');
+  $('save').disabled = false;
+}
+
+function updatePdf(s) {
+  const info = $('info');
+  info.className = 'blue';
+  info.innerHTML = `Vector PDF · ${Math.round(s * 100)}% scale <small>${img.pages} page${img.pages > 1 ? 's' : ''}, all scaled equally · text and vector art stay sharp; embedded photos keep their own resolution</small>`;
+}
+
+function syncFrom(which) {
+  if (!img) return;
+  const v = parseFloat($(which).value);
+  if (!(v > 0)) { update(null); return; }
+  if (which === 'w') $('h').value = fmt(v * img.h / img.w);
+  else $('w').value = fmt(v * img.w / img.h);
+  const wIn = toIn(parseFloat($('w').value));
+  if (img.type === 'pdf') updatePdf(wIn * 72 / img.w); else update(img.w / wIn);
+}
+
+function update(ppi) {
+  const info = $('info');
+  if (ppi == null) { info.className = ''; info.textContent = 'Enter a size'; return; }
+  const cls = ppi > 200 ? 'green' : ppi >= 100 ? 'yellow' : 'red';
+  const msg = { green: 'Good print quality', yellow: 'Acceptable, may look soft up close', red: 'Low resolution, will look pixelated' }[cls];
+  info.className = cls;
+  info.innerHTML = `${Math.round(ppi)} ppi <small>${img.w} × ${img.h} px · ${msg}</small>`;
+}
+
+$('w').addEventListener('input', () => syncFrom('w'));
+$('h').addEventListener('input', () => syncFrom('h'));
+let lastUnit = 'in';
+$('unit').addEventListener('change', () => {
+  // keep the physical size, just change the display units
+  const v = parseFloat($('w').value);
+  if (img && v > 0) {
+    const wIn = lastUnit === 'in' ? v : v / 25.4;
+    $('w').value = fmt(fromIn(wIn));
+    syncFrom('w');
+  }
+  lastUnit = $('unit').value;
+});
+
+$('drop').addEventListener('click', () => $('file').click());
+$('file').addEventListener('change', e => load(e.target.files[0]));
+['dragenter', 'dragover'].forEach(t => $('drop').addEventListener(t, e => { e.preventDefault(); $('drop').classList.add('over'); }));
+['dragleave', 'drop'].forEach(t => $('drop').addEventListener(t, e => { e.preventDefault(); $('drop').classList.remove('over'); }));
+$('drop').addEventListener('drop', e => load(e.dataTransfer.files[0]));
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('drop', e => e.preventDefault());
+
+$('save').addEventListener('click', async () => {
+  const wIn = toIn(parseFloat($('w').value)), hIn = toIn(parseFloat($('h').value));
+  if (!(wIn > 0 && hIn > 0)) return;
+  const res = await window.api.savePdf({
+    bytes: img.bytes, type: img.type,
+    widthPt: wIn * 72, heightPt: hIn * 72,
+    scale: wIn * 72 / img.w,                 // used for PDF input (img.w is in points)
+    defaultName: img.name + (img.type === 'pdf' ? '-resized' : '') + '.pdf'
+  });
+  if (!res.canceled) $('save').textContent = 'Saved ✓';
+  setTimeout(() => $('save').textContent = 'Save PDF…', 1500);
+});
+</script>
+</body>
+</html>
