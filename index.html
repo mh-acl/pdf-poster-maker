@@ -15,6 +15,8 @@
   #drop.loaded { cursor:default; }
   #media { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:var(--card); }
   #media img, #media canvas { width:100%; height:100%; display:block; }
+  #ppiMap { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; opacity:0; transition:opacity .15s; }
+  #stage.ppi #ppiMap { opacity:1; }
   #dim { position:absolute; inset:0; overflow:hidden; pointer-events:none; }
   #shade { position:absolute; box-shadow:0 0 0 9999px rgba(0,0,0,.5); }
   #cropBox { position:absolute; border:1px solid #fff; outline:1px solid #0009; cursor:move; }
@@ -49,6 +51,7 @@
     <span id="hint">Drop an image or PDF here<br>or click to browse</span>
     <div id="stage" hidden>
       <div id="media"></div>
+      <svg id="ppiMap" preserveAspectRatio="none"></svg>
       <div id="dim"><div id="shade"></div></div>
       <div id="cropBox" hidden>
         <div class="hd" tabindex="0" data-e="nw"></div><div class="hd" tabindex="0" data-e="n"></div><div class="hd" tabindex="0" data-e="ne"></div>
@@ -95,6 +98,8 @@ let img = null;                       // {bytes, type, w, h, name}; w/h are px (
 let crop = { l: 0, t: 0, r: 0, b: 0 };  // insets from each edge, in source units (px or pt)
 let inPerUnit = 0;                    // output inches per source unit; the crop holds this constant
 const MIN = 1;                        // smallest cropped size, in source units
+const DPI_TOL = 0.02;                 // embedded images within 2% of each other count as one ppi
+const MIN_IMG_PX = 4;                 // ignore embedded images thinner than this (gradient strips, spacers)
 const FINE = 0.1;                     // drag speed multiplier while Shift is held
 const LOUPE = 160;                    // loupe canvas size, CSS px
 const ZOOMS = [2, 4, 8, 16, 32];      // loupe magnifications (CSS px per source unit)
@@ -136,7 +141,7 @@ async function load(file) {
     type = 'png';
   }
   raw.close();
-  img = { bytes, type, bitmap: oriented, w: oriented.width, h: oriented.height, name: file.name.replace(/\.[^.]+$/, '') };
+  img = { bytes, type, bitmap: oriented, w: oriented.width, h: oriented.height, name: file.name.replace(/\.[^.]+$/, ''), srcPath: window.api.pathForFile(file) };
 
   const el = document.createElement('img');
   el.src = URL.createObjectURL(file);
@@ -171,7 +176,7 @@ async function loadPdf(file) {
   let info;
   try { info = await window.api.inspectPdf(bytes); }
   catch (err) { $('info').className = 'red'; $('info').textContent = 'Could not read this PDF'; return; }
-  img = { bytes, type: 'pdf', w: info.width, h: info.height, pages: info.pages, name: file.name.replace(/\.[^.]+$/, '') };
+  img = { bytes, type: 'pdf', w: info.width, h: info.height, pages: info.pages, name: file.name.replace(/\.[^.]+$/, ''), srcPath: window.api.pathForFile(file) };
 
   let preview;
   try { preview = await renderPdfPreview(bytes); }
@@ -181,6 +186,7 @@ async function loadPdf(file) {
   }
   $('media').replaceChildren(preview);
   initSource(1 / 72);                            // default: original size
+  scanPdfImages(img);                            // async; refines the info box if images are found
 }
 
 function releaseSource() {
@@ -191,6 +197,7 @@ function releaseSource() {
 }
 
 function initSource(defaultInPerUnit) {
+  $('ppiMap').replaceChildren();
   loupeZoom = 8;
   crop = { l: 0, t: 0, r: 0, b: 0 };
   inPerUnit = defaultInPerUnit;
@@ -242,8 +249,86 @@ function showInfo() {
 
 function updatePdf(s) {
   const info = $('info');
-  info.className = 'blue';
-  info.innerHTML = `Vector PDF · ${Math.round(s * 100)}% scale <small>${img.pages} page${img.pages > 1 ? 's' : ''}, all scaled and cropped equally · text and vector art stay sharp; embedded photos keep their own resolution</small>`;
+  const dpis = img.imageDpis;
+  drawPpiMap(s);
+  if (!dpis?.length) {                           // pure vector (or not scanned yet)
+    info.className = 'blue'; info.title = '';
+    info.innerHTML = `Vector PDF · ${Math.round(s * 100)}% scale <small>${img.pages} page${img.pages > 1 ? 's' : ''}, all scaled and cropped equally · text and vector art stay sharp; embedded photos keep their own resolution</small>`;
+    return;
+  }
+  // Embedded images were found: show their effective ppi at the current output size.
+  const eff = dpis.map(d => d.dpi / s);
+  const lo = Math.min(...eff), hi = Math.max(...eff);
+  const same = (hi - lo) / hi <= DPI_TOL;
+  const { cls, msg } = quality(lo);              // judged by the worst image
+  const n = dpis.length;
+  info.className = cls; info.title = 'Hover to highlight the embedded images on the preview';
+  info.innerHTML = `${same ? Math.round(lo) : `${Math.round(lo)}–${Math.round(hi)}`} ppi <small>${same ? '' : 'Lowest: '}${msg} · ${n} embedded image${n > 1 ? 's' : ''} · PDF at ${Math.round(s * 100)}% scale, ${img.pages} page${img.pages > 1 ? 's' : ''}</small>`;
+}
+
+// ---- embedded image resolution (PDF sources) ----
+// Walks a page's pdf.js operator list, tracking the transform matrix, and returns the native
+// resolution (ppi at the PDF's own size) of every image painted. Images drawn more than once are
+// reported once per placement; tiny slivers (gradient strips, spacers) are ignored.
+function imageDpisFromOps(list, OPS, vt) {
+  const mul = (m, n) => [m[0]*n[0]+m[1]*n[2], m[0]*n[1]+m[1]*n[3], m[2]*n[0]+m[3]*n[2], m[2]*n[1]+m[3]*n[3],
+                         m[4]*n[0]+m[5]*n[2]+n[4], m[4]*n[1]+m[5]*n[3]+n[5]];
+  let ctm = [1, 0, 0, 1, 0, 0];
+  const stack = [], out = [];
+  const add = (w, h) => {
+    if (!(w >= MIN_IMG_PX && h >= MIN_IMG_PX)) return;
+    const wpt = Math.hypot(ctm[0], ctm[1]), hpt = Math.hypot(ctm[2], ctm[3]);   // unit square -> pt
+    if (!(wpt > 0.01 && hpt > 0.01)) return;
+    const m = mul(ctm, vt);                      // image space -> preview (top-left origin, rotated) points
+    const quad = [[0, 0], [1, 0], [1, 1], [0, 1]].map(([u, v]) => [m[0]*u + m[2]*v + m[4], m[1]*u + m[3]*v + m[5]]);
+    out.push({ dpi: Math.min(w / wpt, h / hpt) * 72, quad });   // limiting axis
+  };
+  list.fnArray.forEach((fn, i) => {
+    const a = list.argsArray[i];
+    if (fn === OPS.save) stack.push(ctm);
+    else if (fn === OPS.restore) { if (stack.length) ctm = stack.pop(); }
+    else if (fn === OPS.transform) ctm = mul(a, ctm);
+    else if (fn === OPS.paintFormXObjectBegin) { stack.push(ctm); if (a[0]) ctm = mul(a[0], ctm); }
+    else if (fn === OPS.paintFormXObjectEnd) { if (stack.length) ctm = stack.pop(); }
+    else if (fn === OPS.paintImageXObject) add(a[1], a[2]);
+    else if (fn === OPS.paintInlineImageXObject || fn === OPS.paintImageMaskXObject) add(a[0].width, a[0].height);
+  });
+  return out;
+}
+
+// Colour-code the images on the previewed page (page 1) by their ppi at the current size.
+// Only visible while the info box is hovered.
+const PPI_COLOR = { green: '#16a34a', yellow: '#ca8a04', red: '#dc2626' };
+function drawPpiMap(s) {
+  const svg = $('ppiMap'), dpis = img?.type === 'pdf' ? img.imageDpis : null;
+  const here = (dpis || []).filter(d => d.page === 1);
+  if (!here.length || !img.pageBox) { svg.replaceChildren(); return; }
+  svg.setAttribute('viewBox', `0 0 ${img.pageBox[0]} ${img.pageBox[1]}`);
+  svg.innerHTML = here.map(d => {
+    const c = PPI_COLOR[quality(d.dpi / s).cls];
+    return `<polygon points="${d.quad.map(p => p.join(',')).join(' ')}" fill="${c}" fill-opacity=".45" stroke="${c}" stroke-width="2" vector-effect="non-scaling-stroke"/>`;
+  }).join('');
+}
+$('info').addEventListener('mouseenter', () => $('stage').classList.add('ppi'));
+$('info').addEventListener('mouseleave', () => $('stage').classList.remove('ppi'));
+
+// Scan every page in the background; the info box refines itself as pages come in.
+async function scanPdfImages(src) {
+  if (!src.pdfDoc) return;
+  src.imageDpis = [];
+  try {
+    for (let n = 1; n <= src.pages; n++) {
+      const page = await src.pdfDoc.getPage(n);
+      const vp = page.getViewport({ scale: 1 });
+      if (n === 1) src.pageBox = [vp.width, vp.height];
+      const found = imageDpisFromOps(await page.getOperatorList(), pdfjsLib.OPS, vp.transform);
+      if (n > 1) page.cleanup();                 // page 1 stays alive for the preview and loupe
+      if (img !== src) return;                   // another file was opened meanwhile
+      found.forEach(f => f.page = n);
+      if (found.length) { src.imageDpis.push(...found); showInfo(); }
+      await new Promise(r => setTimeout(r));     // keep the UI responsive on big files
+    }
+  } catch (err) { /* unreadable page: keep whatever was found */ }
 }
 
 // Output size follows the width/height fields (aspect ratio of the cropped area is kept).
@@ -257,11 +342,16 @@ function syncFrom(which) {
   showInfo();
 }
 
+function quality(ppi) {
+  const cls = ppi > 200 ? 'green' : ppi >= 100 ? 'yellow' : 'red';
+  const msg = { green: 'Good print quality', yellow: 'Acceptable, may look soft up close', red: 'Low resolution, will look pixelated' }[cls];
+  return { cls, msg };
+}
+
 function update(ppi) {
   const info = $('info');
   if (ppi == null) { info.className = ''; info.textContent = 'Enter a size'; return; }
-  const cls = ppi > 200 ? 'green' : ppi >= 100 ? 'yellow' : 'red';
-  const msg = { green: 'Good print quality', yellow: 'Acceptable, may look soft up close', red: 'Low resolution, will look pixelated' }[cls];
+  const { cls, msg } = quality(ppi);
   const cropped = cw() !== img.w || ch() !== img.h ? ` (cropped from ${img.w} × ${img.h})` : '';
   info.className = cls;
   info.innerHTML = `${Math.round(ppi)} ppi <small>${cw()} × ${ch()} px${cropped} · ${msg}</small>`;
@@ -489,6 +579,7 @@ $('save').addEventListener('click', async () => {
     bytes: img.bytes, type: img.type,
     scale: inPerUnit * 72,                   // points per source unit (px for bitmaps, pt for PDFs)
     crop,
+    sourcePath: img.srcPath,                 // save dialog opens beside the original file
     defaultName: img.name + (img.type === 'pdf' ? '-resized' : '') + '.pdf'
   });
   if (!res.canceled) $('save').textContent = 'Saved ✓';

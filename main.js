@@ -56,10 +56,12 @@ ipcMain.handle('inspect-pdf', async (e, bytes) => {
   return { pages: doc.getPageCount(), width: g.w, height: g.h };
 });
 
-ipcMain.handle('save-pdf', async (e, { bytes, type, scale, crop, defaultName }) => {
+ipcMain.handle('save-pdf', async (e, { bytes, type, scale, crop, defaultName, sourcePath }) => {
   const win = BrowserWindow.fromWebContents(e.sender);
   const { canceled, filePath } = await dialog.showSaveDialog(win, {
-    defaultPath: defaultName, filters: [{ name: 'PDF', extensions: ['pdf'] }]
+    // Default to the folder of the original file; if unknown, Electron falls back to its own default
+    defaultPath: sourcePath ? path.join(path.dirname(sourcePath), defaultName) : defaultName,
+    filters: [{ name: 'PDF', extensions: ['pdf'] }]
   });
   if (canceled) return { canceled: true };
 
