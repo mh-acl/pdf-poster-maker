@@ -48,7 +48,7 @@
 </head>
 <body>
   <div id="drop">
-    <span id="hint">Drop an image or PDF here<br>or click to browse</span>
+    <span id="hint">Drop an image, SVG or PDF here<br>or click to browse</span>
     <div id="stage" hidden>
       <div id="media"></div>
       <svg id="ppiMap" preserveAspectRatio="none"></svg>
@@ -126,6 +126,7 @@ const ch = () => img.h - crop.t - crop.b;
 async function load(file) {
   if (!file) return;
   if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) return loadPdf(file);
+  if (file.type === 'image/svg+xml' || /\.svg$/i.test(file.name)) return loadSvg(file);
   if (!file.type.startsWith('image/')) return;
   let bytes = new Uint8Array(await file.arrayBuffer());
   releaseSource();
@@ -171,21 +172,98 @@ async function renderPdfPreview(bytes) {
 }
 
 async function loadPdf(file) {
-  const bytes = new Uint8Array(await file.arrayBuffer());
+  return openPdfSource(new Uint8Array(await file.arrayBuffer()), file.name, null, window.api.pathForFile(file));
+}
+
+// ---- SVG: size it here, let the main process turn it into a vector PDF, then treat it as a PDF ----
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const SVG_UNITS = { '': 1, px: 1, pt: 96 / 72, pc: 16, in: 96, cm: 96 / 2.54, mm: 96 / 25.4, q: 96 / 101.6, em: 16, rem: 16, ex: 8 };
+const SVG_DEFAULT = { w: 800, h: 600 };       // px; only used when the file gives no size and has no measurable content
+
+// CSS px for an SVG length attribute, or null if missing, relative (%) or unparseable.
+function svgLength(v) {
+  const m = /^\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)\s*([a-z%]*)\s*$/i.exec(v || '');
+  const k = m && SVG_UNITS[m[2].toLowerCase()];
+  const n = k ? parseFloat(m[1]) * k : 0;
+  return n > 0 ? n : null;
+}
+
+// Bounding box of the drawing's contents, for SVGs that declare no size and no viewBox.
+// Works on a sanitized clone (no scripts, handlers or external references) in a hidden element.
+function measureSvg(root) {
+  const el = document.importNode(root, true);
+  for (const n of el.querySelectorAll('script, foreignObject')) n.remove();
+  for (const n of [el, ...el.querySelectorAll('*')]) for (const a of [...n.attributes]) {
+    if (/^on/i.test(a.name) || (/^(xlink:)?href$/i.test(a.name) && !/^\s*(#|data:)/i.test(a.value))) n.removeAttribute(a.name);
+  }
+  const host = document.createElement('div');
+  host.style.cssText = 'position:fixed;left:-99999px;top:0;visibility:hidden';
+  host.appendChild(el); document.body.appendChild(host);
+  let bb = null;
+  try { bb = el.getBBox(); } catch (err) { /* not measurable */ }
+  host.remove();
+  return bb && bb.width > 0 && bb.height > 0 ? bb : null;
+}
+
+// Work out the output size (CSS px) and return a normalized SVG with explicit width/height/viewBox.
+// Size priority: width/height attributes -> viewBox -> measured content -> fixed default.
+function prepareSvg(text) {
+  const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
+  const root = doc.documentElement;
+  if (doc.querySelector('parsererror') || root.localName !== 'svg' || root.namespaceURI !== SVG_NS) throw new Error('not an SVG');
+  let w = svgLength(root.getAttribute('width')), h = svgLength(root.getAttribute('height'));
+  const vbn = (root.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
+  const hasVb = vbn.length === 4 && vbn.every(Number.isFinite) && vbn[2] > 0 && vbn[3] > 0;
+  let vb = hasVb ? vbn : null, how = 'size';
+  if (w && h) {
+    if (!vb) vb = [0, 0, w, h];                                // no viewBox: user units are px
+  } else if (hasVb) {
+    const ar = vbn[2] / vbn[3];
+    if (w) h = w / ar; else if (h) w = h * ar; else { w = vbn[2]; h = vbn[3]; how = 'viewBox'; }
+  } else {
+    const bb = measureSvg(root);
+    if (bb) {
+      const pad = Math.max(bb.width, bb.height) * 0.01;        // strokes aren't part of the bbox
+      vb = [bb.x - pad, bb.y - pad, bb.width + 2 * pad, bb.height + 2 * pad];
+      const ar = vb[2] / vb[3];
+      if (w) h = w / ar; else if (h) w = h * ar; else { w = vb[2]; h = vb[3]; how = 'content'; }
+    } else {
+      if (!w) w = h ? h * SVG_DEFAULT.w / SVG_DEFAULT.h : SVG_DEFAULT.w;
+      if (!h) h = w * SVG_DEFAULT.h / SVG_DEFAULT.w;
+      vb = [0, 0, w, h]; how = 'default';
+    }
+  }
+  root.setAttribute('width', String(w)); root.setAttribute('height', String(h));
+  root.setAttribute('viewBox', vb.join(' '));
+  return { svg: new XMLSerializer().serializeToString(root), width: w, height: h, how };
+}
+
+async function loadSvg(file) {
+  let prep, bytes;
+  try {
+    prep = prepareSvg(await file.text());
+    bytes = await window.api.svgToPdf(prep);
+  } catch (err) { $('info').className = 'red'; $('info').textContent = 'Could not read this SVG'; return; }
+  return openPdfSource(new Uint8Array(bytes), file.name, prep, window.api.pathForFile(file));
+}
+
+// Shared by real PDFs and SVGs (already converted to PDF). `svg` is the sizing info for SVG sources;
+// `srcPath` is the original file's path (save dialog opens beside it).
+async function openPdfSource(bytes, fileName, svg = null, srcPath = '') {
   releaseSource();
   let info;
   try { info = await window.api.inspectPdf(bytes); }
-  catch (err) { $('info').className = 'red'; $('info').textContent = 'Could not read this PDF'; return; }
-  img = { bytes, type: 'pdf', w: info.width, h: info.height, pages: info.pages, name: file.name.replace(/\.[^.]+$/, ''), srcPath: window.api.pathForFile(file) };
+  catch (err) { $('info').className = 'red'; $('info').textContent = svg ? 'Could not read this SVG' : 'Could not read this PDF'; return; }
+  img = { bytes, type: 'pdf', w: info.width, h: info.height, pages: info.pages, svg, name: fileName.replace(/\.[^.]+$/, ''), srcPath };
 
   let preview;
   try { preview = await renderPdfPreview(bytes); }
   catch (err) {                                  // fall back to a text label
     preview = document.createElement('span');
-    preview.textContent = `${file.name}\nPDF · ${info.pages} page${info.pages > 1 ? 's' : ''}`;
+    preview.textContent = svg ? `${fileName}\nSVG` : `${fileName}\nPDF · ${info.pages} page${info.pages > 1 ? 's' : ''}`;
   }
   $('media').replaceChildren(preview);
-  initSource(1 / 72);                            // default: original size
+  initSource(1 / 72);                            // default: original size (an SVG's px size is 0.75pt per px)
   scanPdfImages(img);                            // async; refines the info box if images are found
 }
 
@@ -253,6 +331,12 @@ function updatePdf(s) {
   drawPpiMap(s);
   if (!dpis?.length) {                           // pure vector (or not scanned yet)
     info.className = 'blue'; info.title = '';
+    if (img.svg) {
+      const { width, height, how } = img.svg;
+      const src = { size: "the SVG's width/height", viewBox: "the SVG's viewBox", content: 'measured from its content (no size in file)', default: 'a default size (no size in file)' }[how];
+      info.innerHTML = `Vector SVG · ${Math.round(s * 100)}% scale <small>100% = ${fmt(width)} × ${fmt(height)} px, from ${src} · drawn as vector art; filters and blurs may be rasterized</small>`;
+      return;
+    }
     info.innerHTML = `Vector PDF · ${Math.round(s * 100)}% scale <small>${img.pages} page${img.pages > 1 ? 's' : ''}, all scaled and cropped equally · text and vector art stay sharp; embedded photos keep their own resolution</small>`;
     return;
   }
@@ -263,7 +347,7 @@ function updatePdf(s) {
   const { cls, msg } = quality(lo);              // judged by the worst image
   const n = dpis.length;
   info.className = cls; info.title = 'Hover to highlight the embedded images on the preview';
-  info.innerHTML = `${same ? Math.round(lo) : `${Math.round(lo)}–${Math.round(hi)}`} ppi <small>${same ? '' : 'Lowest: '}${msg} · ${n} embedded image${n > 1 ? 's' : ''} · PDF at ${Math.round(s * 100)}% scale, ${img.pages} page${img.pages > 1 ? 's' : ''}</small>`;
+  info.innerHTML = `${same ? Math.round(lo) : `${Math.round(lo)}–${Math.round(hi)}`} ppi <small>${same ? '' : 'Lowest: '}${msg} · ${n} embedded image${n > 1 ? 's' : ''} · ${img.svg ? 'SVG' : 'PDF'} at ${Math.round(s * 100)}% scale, ${img.pages} page${img.pages > 1 ? 's' : ''}</small>`;
 }
 
 // ---- embedded image resolution (PDF sources) ----
@@ -580,7 +664,7 @@ $('save').addEventListener('click', async () => {
     scale: inPerUnit * 72,                   // points per source unit (px for bitmaps, pt for PDFs)
     crop,
     sourcePath: img.srcPath,                 // save dialog opens beside the original file
-    defaultName: img.name + (img.type === 'pdf' ? '-resized' : '') + '.pdf'
+    defaultName: img.name + (img.type === 'pdf' && !img.svg ? '-resized' : '') + '.pdf'
   });
   if (!res.canceled) $('save').textContent = 'Saved ✓';
   setTimeout(() => $('save').textContent = 'Save PDF…', 1500);
