@@ -7,6 +7,7 @@
   :root { --bg:#fff; --fg:#222; --mut:#777; --line:#bbb; --card:#f5f5f5; }
   @media (prefers-color-scheme: dark) { :root { --bg:#1e1e1e; --fg:#eee; --mut:#999; --line:#555; --card:#2a2a2a; } }
   * { box-sizing: border-box; }
+  [hidden] { display:none !important; }
   body { margin:0; padding:20px; font:14px system-ui, sans-serif; background:var(--bg); color:var(--fg); display:flex; flex-direction:column; gap:16px; height:100vh; }
   #drop { flex:1; min-height:200px; border:2px dashed var(--line); border-radius:10px; display:flex; align-items:center; justify-content:center; text-align:center; color:var(--mut); cursor:pointer; overflow:hidden; background:var(--card); }
   #drop.over { border-color:#3b82f6; color:#3b82f6; }
@@ -36,7 +37,10 @@
   #info.green { background:#16a34a; } #info.yellow { background:#ca8a04; } #info.red { background:#dc2626; } #info.blue { background:#2563eb; }
   #drop span { white-space:pre-line; padding:12px; }
   button { padding:10px; font:inherit; font-weight:600; border:0; border-radius:8px; background:#3b82f6; color:#fff; cursor:pointer; }
+  #cropRow { margin-top:8px; }
   #cropRow button { align-self:flex-end; padding:8px 10px; }
+  #cropHead .cap { margin:0; }
+  #cropToggle { padding:8px 12px; }
   button:disabled { opacity:.4; cursor:default; }
 </style>
 </head>
@@ -46,7 +50,7 @@
     <div id="stage" hidden>
       <div id="media"></div>
       <div id="dim"><div id="shade"></div></div>
-      <div id="cropBox">
+      <div id="cropBox" hidden>
         <div class="hd" tabindex="0" data-e="nw"></div><div class="hd" tabindex="0" data-e="n"></div><div class="hd" tabindex="0" data-e="ne"></div>
         <div class="hd" tabindex="0" data-e="w"></div><div class="hd" tabindex="0" data-e="e"></div>
         <div class="hd" tabindex="0" data-e="sw"></div><div class="hd" tabindex="0" data-e="s"></div><div class="hd" tabindex="0" data-e="se"></div>
@@ -65,8 +69,11 @@
   </div>
 
   <div>
-    <div class="cap">Crop: <span id="cropUnit">px</span> in from each edge (or drag on the preview)</div>
-    <div class="row" id="cropRow">
+    <div class="row" id="cropHead">
+      <button class="sec" id="cropToggle" disabled>Adjust Crop</button>
+      <div class="cap" id="cropCap" hidden>Crop: <span id="cropUnit">px</span> in from each edge (or drag on the preview)</div>
+    </div>
+    <div class="row" id="cropRow" hidden>
       <label>Left <input type="number" id="cl" min="0" disabled></label>
       <label>Top <input type="number" id="ct" min="0" disabled></label>
       <label>Right <input type="number" id="cr" min="0" disabled></label>
@@ -94,6 +101,16 @@ const ZOOMS = [2, 4, 8, 16, 32];      // loupe magnifications (CSS px per source
 let loupeZoom = 8;
 const loupe = { on: false, edges: '', fx: 0, fy: 0, fine: false };
 let pdfCache = null, pdfBusy = false, keyTimer = 0;
+let cropMode = false;                 // crop handles and fields are only shown while true
+
+// Show/hide the crop UI. The crop itself stays applied (the shade still dims the cropped-off area).
+function setCropMode(on) {
+  cropMode = !!on && !!img;
+  $('cropBox').hidden = !cropMode;
+  $('cropRow').hidden = $('cropCap').hidden = !cropMode;
+  $('cropToggle').textContent = cropMode ? 'Done Cropping' : 'Adjust Crop';
+  if (!cropMode) { hideLoupe(); if (document.activeElement?.closest?.('#cropBox')) document.activeElement.blur(); }
+}
 const toIn = v => $('unit').value === 'in' ? v : v / 25.4;
 const fromIn = v => $('unit').value === 'in' ? v : v * 25.4;
 const fmt = v => String(+v.toFixed(3));
@@ -178,7 +195,8 @@ function initSource(defaultInPerUnit) {
   crop = { l: 0, t: 0, r: 0, b: 0 };
   inPerUnit = defaultInPerUnit;
   $('hint').hidden = true; $('stage').hidden = false; $('drop').classList.add('loaded');
-  $('w').disabled = $('h').disabled = $('reset').disabled = $('save').disabled = false;
+  $('w').disabled = $('h').disabled = $('reset').disabled = $('save').disabled = $('cropToggle').disabled = false;
+  setCropMode(false);
   for (const k of ['l', 't', 'r', 'b']) { $('c' + k).disabled = false; $('c' + k).step = img.type === 'pdf' ? '0.1' : '1'; }
   $('cropUnit').textContent = img.type === 'pdf' ? 'pt' : 'px';
   layoutStage();
@@ -258,6 +276,8 @@ for (const k of ['l', 't', 'r', 'b']) {
   });
   $('c' + k).addEventListener('change', () => img && renderCrop());   // show clamped value
 }
+$('cropToggle').addEventListener('click', () => setCropMode(!cropMode));
+window.addEventListener('keydown', e => { if (e.key === 'Escape' && cropMode) setCropMode(false); });
 $('reset').addEventListener('click', () => { setCrop({ l: 0, t: 0, r: 0, b: 0 }); renderCrop(); });
 
 const EDGE_KEY = { w: 'l', e: 'r', n: 't', s: 'b' };

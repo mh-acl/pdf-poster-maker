@@ -1,10 +1,65 @@
 {
-  "name": "PDF Poster Maker",
+  "name": "pdf-poster-maker",
   "version": "1.0.0",
   "description": "Marginless image to PDF converter",
+  "productName": "PDF Poster Maker",
   "main": "main.js",
-  "scripts": { "start": "electron ." },
-  "dependencies": { "pdf-lib": "^1.17.1",
-    "pdfjs-dist": "3.11.174" },
-  "devDependencies": { "electron": "^33.0.0" }
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "build": "electron-builder",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win"
+  },
+  "dependencies": {
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "3.11.174"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.mh-acl.pdf-poster-maker",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "index.html",
+      "main.js",
+      "preload.js",
+      "!node_modules/pdfjs-dist/**",
+      "node_modules/pdfjs-dist/package.json",
+      "node_modules/pdfjs-dist/build/pdf.js",
+      "node_modules/pdfjs-dist/build/pdf.worker.js",
+      "node_modules/pdfjs-dist/cmaps/**",
+      "!**/*.map"
+    ],
+    "mac": {
+      "category": "public.app-category.graphics-design",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
 }
