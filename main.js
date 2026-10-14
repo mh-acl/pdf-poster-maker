@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const { PDFDocument, degrees } = require('pdf-lib');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 // GPU unneccessary, and it was causing lots of errors to be logged
@@ -56,10 +57,54 @@ ipcMain.handle('inspect-pdf', async (e, bytes) => {
   return { pages: doc.getPageCount(), width: g.w, height: g.h };
 });
 
-ipcMain.handle('save-pdf', async (e, { bytes, type, scale, crop, defaultName }) => {
+// SVG -> vector PDF, using Chromium's own print pipeline (the same engine that draws the
+// preview). The SVG is shown as an <img> on a page sized exactly to it and printed with
+// no margins, so shapes, gradients, clips and text stay vector (text becomes embedded
+// fonts). Rendering it as an image also means scripts and external resources never run.
+// Filters/blur/some masks are rasterized by Chromium. The result is then treated like any
+// other PDF source (preview, crop, scale and save all reuse the PDF path).
+ipcMain.handle('svg-to-pdf', async (e, { svg, width, height }) => {
+  if (!(width > 0 && height > 0)) throw new Error('bad SVG size');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poster-svg-'));
+  const win = new BrowserWindow({
+    show: false, width: 800, height: 600,
+    webPreferences: { javascript: false, sandbox: true, contextIsolation: true }
+  });
+  try {
+    const w = +width.toFixed(4), h = +height.toFixed(4);     // CSS px (1px = 0.75pt)
+    const pw = Math.ceil(w) + 2, ph = Math.ceil(h) + 2;      // page a little oversized; trimmed to w x h below
+    fs.writeFileSync(path.join(dir, 'art.svg'), svg);
+    fs.writeFileSync(path.join(dir, 'page.html'),
+      `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+        @page { size: ${pw}px ${ph}px; margin: 0 }
+        html, body { margin: 0; padding: 0; overflow: hidden }
+        img { display: block; width: ${w}px; height: ${h}px }
+      </style></head><body><img src="art.svg"></body></html>`);
+    await win.loadFile(path.join(dir, 'page.html'));
+    const pdf = await win.webContents.printToPDF({ preferCSSPageSize: true, printBackground: true, pageRanges: '1' });
+    // Chromium snaps page sizes to its print grid (~1/300 in, can round down), hence the oversized page
+    // above. Trim the page boxes to the exact size; content is anchored at the page's top-left.
+    const doc = await PDFDocument.load(pdf);
+    const page = doc.getPage(0), full = page.getMediaBox();
+    const ew = w * 0.75, eh = h * 0.75;
+    if (ew <= full.width && eh <= full.height) {
+      const box = [full.x, full.y + full.height - eh, ew, eh];
+      page.setMediaBox(...box); page.setCropBox(...box);
+      return await doc.save();
+    }
+    return pdf;
+  } finally {
+    win.destroy();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+ipcMain.handle('save-pdf', async (e, { bytes, type, scale, crop, defaultName, sourcePath }) => {
   const win = BrowserWindow.fromWebContents(e.sender);
   const { canceled, filePath } = await dialog.showSaveDialog(win, {
-    defaultPath: defaultName, filters: [{ name: 'PDF', extensions: ['pdf'] }]
+    // Default to the folder of the original file; if unknown, Electron falls back to its own default
+    defaultPath: sourcePath ? path.join(path.dirname(sourcePath), defaultName) : defaultName,
+    filters: [{ name: 'PDF', extensions: ['pdf'] }]
   });
   if (canceled) return { canceled: true };
 
