@@ -1,6 +1,6 @@
 {
   "name": "pdf-poster-maker",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Marginless image to PDF converter",
   "productName": "PDF Poster Maker",
   "main": "main.js",
@@ -8,8 +8,10 @@
     "start": "electron .",
     "pack": "electron-builder --dir",
     "build": "electron-builder",
-    "build:mac": "electron-builder --mac",
-    "build:win": "electron-builder --win"
+    "build:mac": "electron-builder --mac --publish never",
+    "build:win": "electron-builder --win --publish never",
+    "build:all": "rm -rf dist && electron-builder --mac --win --publish never",
+    "release": "npm run build:all && gh release create \"v$npm_package_version\" dist/*.zip --target \"$(git rev-parse HEAD)\" --title \"v$npm_package_version\" --generate-notes"
   },
   "dependencies": {
     "pdf-lib": "^1.17.1",
@@ -45,21 +47,19 @@
             "x64"
           ]
         }
-      ]
+      ],
+      "artifactName": "${name}-${version}-mac-${arch}.${ext}"
     },
     "win": {
       "target": [
         {
-          "target": "nsis",
+          "target": "zip",
           "arch": [
             "x64"
           ]
         }
-      ]
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      ],
+      "artifactName": "${name}-${version}-win-${arch}.${ext}"
     }
   }
 }
